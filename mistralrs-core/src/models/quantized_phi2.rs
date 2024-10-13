@@ -18,12 +18,15 @@ use crate::layers::Sdpa;
 use crate::layers::{CausalMasker, QLinear};
 use crate::paged_attention::AttentionImplementation;
 use crate::paged_attention::PagedAttention;
+use crate::paged_attention::PagedAttentionKVCache;
 use crate::pipeline::text_models_inputs_processor::PagedAttentionInputMetadata;
+use crate::pipeline::LayerCache;
 use crate::pipeline::{extract_logits, Cache};
 use crate::utils::gguf_metadata::ContentMetadata;
 use crate::utils::model_config as ModelConfig;
 use crate::utils::progress::NiceProgressBar;
 use crate::DeviceMapMetadata;
+use crate::KVCacheType;
 use crate::Topology;
 
 pub const MAX_SEQ_LEN: usize = 4096;
@@ -75,8 +78,8 @@ impl LayerWeights {
         x: &Tensor,
         mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
-        kv_cache: &mut Option<(Tensor, Tensor)>,
-        metadata: Option<((Tensor, Tensor), &mut PagedAttentionInputMetadata)>,
+        kv_cache: &mut Option<LayerCache>,
+        metadata: Option<(PagedAttentionKVCache, &mut PagedAttentionInputMetadata)>,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, n_embd) = x.dims3()?;
         let qkv =
@@ -97,17 +100,8 @@ impl LayerWeights {
 
         let y = match &self.paged_attn {
             Some(paged_attn) => {
-                let ((key_cache, value_cache), input_metadata) = metadata.unwrap();
-                paged_attn.forward(
-                    &q,
-                    &k,
-                    &v,
-                    mask,
-                    Some(key_cache),
-                    Some(value_cache),
-                    input_metadata,
-                    None,
-                )?
+                let (kv_cache, input_metadata) = metadata.unwrap();
+                paged_attn.forward(&q, &k, &v, mask, Some(kv_cache), input_metadata, None)?
             }
             None => {
                 let (k, v) = Cache::update_kv_cache(kv_cache, k, v, false)?;
@@ -288,6 +282,7 @@ impl ModelConfig::FromGGUF for ModelWeights {
                     None, // TODO
                     device,
                     None,
+                    KVCacheType::FullPrecision, // TODO: no paged attn quant for gguf models
                 )?),
             };
             let qkv = QLinear::new(&mut ct, &format!("{prefix}.attn_qkv"), device)?;
@@ -343,7 +338,7 @@ impl ModelWeights {
         input_ids: &Tensor,
         seqlen_offsets: &[usize],
         context_lens: Vec<(usize, usize)>,
-        mut metadata: Option<(Vec<(Tensor, Tensor)>, &mut PagedAttentionInputMetadata)>,
+        mut metadata: Option<(Vec<PagedAttentionKVCache>, &mut PagedAttentionInputMetadata)>,
     ) -> Result<Tensor> {
         let mut xs = self.tok_embeddings.forward(input_ids)?;
         let mut cache = self.cache.lock();

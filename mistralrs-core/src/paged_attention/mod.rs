@@ -13,6 +13,7 @@ pub const _PAD_SLOT_ID: i64 = -1;
 
 pub use block_engine::{BlockEngine, BlockTables, LogicalTokenBlock};
 pub use block_engine_sequence::BlockEngineSequence;
+pub(crate) use cache_engine::PagedAttentionKVCache;
 pub use cache_engine::{CacheConfig, CacheEngine};
 use candle_core::{DType, Device};
 pub use config::{ModelConfigLike, ModelConfigMetadata};
@@ -23,6 +24,40 @@ pub use scheduler::{
 
 use crate::MemoryUsage;
 use tracing::info;
+
+#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass(eq, eq_int))]
+#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
+#[derive(Clone, Copy, Default, serde::Deserialize, Debug, PartialEq, Eq)]
+pub enum KVCacheType {
+    #[default]
+    #[serde(rename = "full-precision")]
+    FullPrecision,
+    #[serde(rename = "fp8")]
+    F8E4M3,
+}
+
+impl std::str::FromStr for KVCacheType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "fp8" => Ok(Self::F8E4M3),
+            "full-precision" => Ok(Self::FullPrecision),
+            other => Err(format!(
+                "KV cache type must be one of `fp8`, `full-precision`, got `{other}`"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for KVCacheType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::F8E4M3 => write!(f, "fp8"),
+            Self::FullPrecision => write!(f, "full-precision"),
+        }
+    }
+}
 
 /// All memory counts in MB. Default for block size is 32.
 #[derive(Clone, Copy)]

@@ -9,7 +9,7 @@ use crate::{
     device_map::DeviceMapper,
     layers::{Llama3RopeConfig, PhiRopeScalingConfig},
     lora::{LoraConfig, Ordering},
-    paged_attention::{AttentionImplementation, ModelConfigMetadata},
+    paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttentionKVCache},
     pipeline::{
         isq::{IsqModelLoader, WordEmbeddingsShim},
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
@@ -18,6 +18,7 @@ use crate::{
     serde_default_fn,
     utils::log::once_log_info,
     xlora_models::NonGranularState,
+    KVCacheType,
 };
 use anyhow::Result;
 use candle_core::{Device, Tensor};
@@ -44,7 +45,7 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin {
         start_offsets_kernel: Tensor,
         context_lens: Vec<(usize, usize)>,
         position_ids: Vec<usize>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &mut PagedAttentionInputMetadata)>,
+        metadata: Option<(Vec<PagedAttentionKVCache>, &mut PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> candle_core::Result<Tensor>;
     #[allow(clippy::too_many_arguments)]
@@ -84,6 +85,8 @@ pub struct NormalLoadingMetadata {
     pub loading_isq: bool,
     // Device mapping target device (the one that is not the cpu)
     pub real_device: Device,
+    // PagedAttention cache type
+    pub cache_type: Option<KVCacheType>,
 }
 
 pub trait NormalModelLoader: IsqModelLoader {

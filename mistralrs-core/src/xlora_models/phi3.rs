@@ -7,10 +7,10 @@ use crate::{
     attention::SdpaParams,
     layers::Sdpa,
     lora::{linear_no_bias, LinearLayerLike, LoraConfig, Ordering},
-    paged_attention::ModelConfigMetadata,
+    paged_attention::{ModelConfigMetadata, PagedAttentionKVCache},
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        IsqModel, NormalLoadingMetadata,
+        IsqModel, LayerCache, NormalLoadingMetadata,
     },
     utils::progress::NiceProgressBar,
 };
@@ -106,7 +106,7 @@ impl Attention {
         attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         position_ids: &[usize],
-        kv_cache: &mut Option<(Tensor, Tensor)>,
+        kv_cache: &mut Option<LayerCache>,
         scalings: Option<Tensor>,
         global_scaling_weight: f64,
         is_scaling_pass: Option<f64>,
@@ -347,7 +347,7 @@ impl DecoderLayer {
         attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         position_ids: &[usize],
-        kv_cache: &mut Option<(Tensor, Tensor)>,
+        kv_cache: &mut Option<LayerCache>,
         scalings: Option<Tensor>,
         global_scaling_weight: f64,
         is_scaling_pass: Option<f64>,
@@ -722,7 +722,7 @@ impl NormalModel for Model {
         _start_offsets_kernel: Tensor,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
-        _metadata: Option<(Vec<(Tensor, Tensor)>, &mut PagedAttentionInputMetadata)>,
+        _metadata: Option<(Vec<PagedAttentionKVCache>, &mut PagedAttentionInputMetadata)>,
         _flash_params: &FlashParams,
     ) -> Result<Tensor> {
         unreachable!()

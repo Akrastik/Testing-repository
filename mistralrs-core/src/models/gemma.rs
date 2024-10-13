@@ -16,11 +16,13 @@ use crate::{
     get_delta_from_lora_ab,
     layers::{CausalMasker, MatMul, RmsNorm, Sdpa},
     layers_masker::PastKvLenCache,
-    paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
+    paged_attention::{
+        AttentionImplementation, ModelConfigMetadata, PagedAttention, PagedAttentionKVCache,
+    },
     pipeline::{
         extract_logits,
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        Cache, IsqModel, NormalLoadingMetadata, NormalModel,
+        Cache, IsqModel, LayerCache, NormalLoadingMetadata, NormalModel,
     },
     serde_default_fn,
     utils::progress::NiceProgressBar,
@@ -254,8 +256,8 @@ impl Attention {
         attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         start_offsets_kernel: Tensor,
-        kv_cache: &mut Option<(Tensor, Tensor)>,
-        metadata: Option<((Tensor, Tensor), &mut PagedAttentionInputMetadata)>,
+        kv_cache: &mut Option<LayerCache>,
+        metadata: Option<(PagedAttentionKVCache, &mut PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
@@ -308,14 +310,13 @@ impl Attention {
 
         let mut attn_output = match &self.paged_attn {
             Some(paged_attn) => {
-                let ((key_cache, value_cache), input_metadata) = metadata.unwrap();
+                let (kv_cache, input_metadata) = metadata.unwrap();
                 paged_attn.forward(
                     &q,
                     &k,
                     &v,
                     attention_mask,
-                    Some(key_cache),
-                    Some(value_cache),
+                    Some(kv_cache),
                     input_metadata,
                     None,
                 )?
@@ -399,8 +400,8 @@ impl DecoderLayer {
         attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         start_offsets_kernel: Tensor,
-        kv_cache: &mut Option<(Tensor, Tensor)>,
-        metadata: Option<((Tensor, Tensor), &mut PagedAttentionInputMetadata)>,
+        kv_cache: &mut Option<LayerCache>,
+        metadata: Option<(PagedAttentionKVCache, &mut PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let residual = xs;
@@ -498,6 +499,7 @@ impl Model {
                     None,
                     device,
                     None,
+                    normal_loading_metadata.cache_type.unwrap_or_default(),
                 )?),
             };
             let layer = DecoderLayer::new(
@@ -549,7 +551,7 @@ impl Model {
         seqlen_offsets: &[usize],
         start_offsets_kernel: Tensor,
         context_lens: Vec<(usize, usize)>,
-        mut metadata: Option<(Vec<(Tensor, Tensor)>, &mut PagedAttentionInputMetadata)>,
+        mut metadata: Option<(Vec<PagedAttentionKVCache>, &mut PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let xs = self.embed_tokens.forward(input_ids)?;
@@ -625,7 +627,7 @@ impl NormalModel for Model {
         start_offsets_kernel: Tensor,
         context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &mut PagedAttentionInputMetadata)>,
+        metadata: Option<(Vec<PagedAttentionKVCache>, &mut PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
         self.forward(

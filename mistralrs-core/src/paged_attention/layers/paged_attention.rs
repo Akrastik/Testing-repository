@@ -1,8 +1,12 @@
-use candle_core::{Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor};
 
 use mistralrs_paged_attn::{paged_attention, reshape_and_cache};
+use mistralrs_quant::{FP8Linear, FP8QuantizationResult};
 
-use crate::pipeline::text_models_inputs_processor::PagedAttentionInputMetadata;
+use crate::{
+    paged_attention::{KVCacheType, PagedAttentionKVCache},
+    pipeline::text_models_inputs_processor::PagedAttentionInputMetadata,
+};
 
 const _PARTITION_SIZE: usize = 512;
 
@@ -15,9 +19,12 @@ pub struct PagedAttention {
     sliding_window: Option<usize>,
     num_queries_per_kv: usize,
     alibi_slopes: Option<Tensor>,
+    cache_dtype: KVCacheType,
+    dummy_scale: Tensor,
 }
 
 impl PagedAttention {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         num_attention_heads: usize,
         head_dim: usize,
@@ -26,6 +33,7 @@ impl PagedAttention {
         sliding_window: Option<usize>,
         device: &Device,
         alibi_slopes: Option<Vec<f64>>,
+        cache_dtype: KVCacheType,
     ) -> Result<Self> {
         let num_key_value_heads = num_key_value_heads.unwrap_or(num_attention_heads);
         let num_queries_per_kv = num_attention_heads / num_key_value_heads;
@@ -42,6 +50,8 @@ impl PagedAttention {
             sliding_window,
             num_queries_per_kv,
             alibi_slopes,
+            cache_dtype,
+            dummy_scale: Tensor::new(1f32, device)?,
         })
     }
 
@@ -61,8 +71,7 @@ impl PagedAttention {
         key: &Tensor,
         value: &Tensor,
         attention_mask: Option<&Tensor>,
-        mut key_cache: Option<Tensor>,
-        mut value_cache: Option<Tensor>,
+        mut kv_cache: Option<PagedAttentionKVCache>,
         input_metadata: &mut PagedAttentionInputMetadata,
         softcapping: Option<f64>,
     ) -> Result<Tensor> {
@@ -135,18 +144,59 @@ impl PagedAttention {
             (q, k, v)
         };
 
+        // let (key, value, key_scale, value_scale) = match self.cache_dtype {
+        //     KVCacheType::F8E4M3 => {
+        //         let FP8QuantizationResult {
+        //             qw: key,
+        //             quantize_scale: key_scale,
+        //             dequantize_scale,
+        //         } = FP8Linear::quantize(&key, DType::F8E4M3)?;
+        //         let FP8QuantizationResult {
+        //             qw: value,
+        //             quantize_scale: value_scale,
+        //             dequantize_scale,
+        //         } = FP8Linear::quantize(&value, DType::F8E4M3)?;
+        //         (key, value, key_scale, value_scale)
+        //     }
+        //     KVCacheType::FullPrecision => (
+        //         key,
+        //         value,
+        //         self.dummy_scale.clone(),
+        //         self.dummy_scale.clone(),
+        //     ),
+        // };
+
+        let (key_scale, value_scale) = match self.cache_dtype {
+            KVCacheType::F8E4M3 => {
+                let FP8QuantizationResult {
+                    qw: _key,
+                    quantize_scale: _,
+                    dequantize_scale: key_scale,
+                } = FP8Linear::quantize(&key, DType::F8E4M3)?;
+                let FP8QuantizationResult {
+                    qw: _value,
+                    quantize_scale,
+                    dequantize_scale: value_scale,
+                } = FP8Linear::quantize(&value, DType::F8E4M3)?;
+                (key_scale, value_scale)
+            }
+            KVCacheType::FullPrecision => (self.dummy_scale.clone(), self.dummy_scale.clone()),
+        };
+
         // key: Tensor,              // [num_tokens, num_heads, head_size]
         // value: Tensor,            // [num_tokens, num_heads, head_size]
         // key_cache: &mut Tensor,   // [num_blocks, num_heads, head_size/x, block_size, x] 48,32,16,16,8
         // value_cache: &mut Tensor, // [num_blocks, num_heads, head_size, block_size] 48,32,128,16
         // slot_mapping: Tensor,     // [num_tokens]
-        if key_cache.as_ref().is_some_and(|_| value_cache.is_some()) {
+        if let Some(PagedAttentionKVCache { k_cache, v_cache }) = &mut kv_cache {
             reshape_and_cache(
                 &key,
                 &value,
-                key_cache.as_mut().unwrap(),
-                value_cache.as_mut().unwrap(),
+                k_cache,
+                v_cache,
                 &slot_mapping,
+                &key_scale,
+                &value_scale,
             )?;
         }
 
@@ -154,6 +204,11 @@ impl PagedAttention {
             // Return result in prefill
             return Ok(att);
         }
+
+        let Some(PagedAttentionKVCache { k_cache, v_cache }) = &mut kv_cache else {
+            unreachable!()
+        };
+
         //  Args:
         //  output: shape = [num_generation_tokens, num_heads, head_size]
         //
@@ -171,13 +226,15 @@ impl PagedAttention {
         #[allow(clippy::cast_possible_truncation)]
         paged_attention(
             &query,
-            key_cache.as_ref().unwrap(),
-            value_cache.as_ref().unwrap(),
+            k_cache,
+            v_cache,
             input_metadata.block_tables.as_ref().unwrap(),
             input_metadata.context_lens.as_ref().unwrap(),
             input_metadata.max_context_len.unwrap(),
             self.scale,
             softcapping.unwrap_or(1.0f64) as f32,
+            &key_scale,
+            &value_scale,
         )
     }
 }
